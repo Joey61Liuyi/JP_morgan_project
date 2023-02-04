@@ -532,7 +532,7 @@ def train(
 ):
 
     if foldername != "":
-        output_path = foldername + "/model.pth"
+        output_path = foldername + "model.h5"
 
     p1 = int(0.75 * config["epochs"])
     p2 = int(0.9 * config["epochs"])
@@ -586,7 +586,7 @@ def train(
         #         )
 
     if foldername != "":
-        model.save(output_path)
+        model.save_weights(output_path)
 
 
 if __name__ == '__main__':
@@ -595,7 +595,7 @@ if __name__ == '__main__':
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--testmissingratio", type=float, default=0.1)
     parser.add_argument("--unconditional", action="store_true")
-    parser.add_argument("--modelfolder", type=str, default="")
+    parser.add_argument("--modelfolder", type=str, default="stock_fold_20230205_035438")
     parser.add_argument("--nsample", type=int, default=100)
     args = parser.parse_args()
     print(args)
@@ -610,12 +610,9 @@ if __name__ == '__main__':
     print('model folder:', foldername)
     os.makedirs(foldername, exist_ok=True)
     train_data, test_data = create_data()
-
+    model = CSDI_base(target_dim=131, config=config)
     if args.modelfolder == "":
-        model = CSDI_base(target_dim=131, config=config)
         model.compile(optimizer='adam')
-
-
         train(
             model,
             config["train"],
@@ -624,15 +621,11 @@ if __name__ == '__main__':
             foldername=foldername,
         )
     else:
-        model = tf.keras.models.load_model('./save/'+ args.modelfolder + "/model.h5")
+        config['train']['epochs'] = 1
+        train(model, config["train"], train_data)
+        model.load_weights('./save/'+ args.modelfolder + "/model.h5")
 
     # evaluate(model, test_data, nsample=args.nsample, scaler=1, foldername=foldername)
 
-    # init = tf.global_variables_initializer()
-    #
-    # sess = tf.InteractiveSession()
-    # sess.run(init)
-    # result = sess.run(diffusion_embedding)
-    # print(result)
     print('OK')
 
