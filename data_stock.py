@@ -62,5 +62,13 @@ test_data = data[-1:]
 
 train_data = np.array(train_data)
 test_data = np.array(test_data)
+
+import tensorflow as tf
+train_data = tf.convert_to_tensor(train_data)
+
+
+
+
+
 np.save('stock_train.npy', train_data, allow_pickle=True)
 np.save('stock_test.npy', test_data, allow_pickle=True)
