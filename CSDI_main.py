@@ -11,7 +11,7 @@ import datetime
 import argparse
 import math
 import os
-from tensorflow.keras import datasets, layers, models, losses
+# from tensorflow.keras import datasets, layers, models, losses
 import json
 
 def silu(x):
@@ -562,7 +562,7 @@ def kaiming_normal(shape, dtype=tf.float64, partition_info=None):
 def default_masking(batch, missing_ratio, seed=0, train =True):
     np.random.seed(seed)
     observed_masks = batch!=0
-    observed_masks = observed_masks.astype(np.long)
+    observed_masks = observed_masks.astype(np.float64)
     observed_values = batch
     gt_mask_all = []
     tp_all = []
@@ -586,9 +586,6 @@ def default_masking(batch, missing_ratio, seed=0, train =True):
         "timepoints": tp_all
     }
     return s
-
-
-
 
 
 def train(
@@ -660,8 +657,6 @@ def train(
 
 
 def evaluate(model, test_data, nsample=100, scaler=1, mean_scaler=0, foldername=""):
-
-
 
     mse_total = 0
     evalpoints_total = 0
@@ -794,7 +789,7 @@ if __name__ == '__main__':
     else:
         config['train']['epochs'] = 1
         train(model, config["train"], train_data)
-        # model.load_weights('./save/'+ args.modelfolder + "/model.h5")
+        model.load_weights('./save/'+ args.modelfolder + "/model.h5")
 
     evaluate(model, test_data, nsample=args.nsample, scaler=1, foldername=foldername)
 
