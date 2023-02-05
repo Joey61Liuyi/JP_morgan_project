@@ -1367,7 +1367,7 @@ def train_main(output_directory,
             loss_mask = train_batch['observed_mask']-train_batch['gt_mask']
 
             B, L, K = audio.shape
-            diffusion_steps = tf.random.uniform(shape=(B,), minval=0, maxval=T + 1, dtype=tf.int32)
+            diffusion_steps = tf.random.uniform(shape=(B,), minval=0, maxval=T, dtype=tf.int32)
 
             z = tf.random.normal(shape=audio.shape)
             z = audio * mask + z * (1 - mask)
@@ -1377,7 +1377,15 @@ def train_main(output_directory,
 
             with tf.GradientTape() as tape:
                 epsilon_theta = model((transformed_X, cond, mask, diffusion_steps,))
-                print('ok')
+                loss_mask = tf.constant(loss_mask, dtype = tf.bool)
+                predict = epsilon_theta[loss_mask]
+                label = audio[loss_mask]
+                loss = tf.keras.losses.mean_squared_error(label, predict)
+                tape.watch(loss)
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        print('ok')
+
 
     #             epsilon_theta[loss_mask], z[loss_mask]
     #
