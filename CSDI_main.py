@@ -480,6 +480,75 @@ class CSDI_base(tf.keras.Model):
             cut_length,
         )
 
+    def evaluate(self, batch, n_samples):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            _,
+            cut_length,
+        ) = self.process_data(batch)
+
+        cond_mask = gt_mask
+        target_mask = observed_mask - cond_mask
+
+        side_info = self.get_side_info(observed_tp, cond_mask)
+
+        samples = self.impute(observed_data, cond_mask, side_info, n_samples)
+
+        target_mask = target_mask.numpy()
+        for i in range(len(cut_length)): # to avoid double evaluation
+            target_mask[i, ..., 0 : int(cut_length.numpy()[i])] = 0
+        return samples, observed_data, target_mask, observed_mask, observed_tp
+    def impute(self, observed_data, cond_mask, side_info, n_samples):
+        B, K, L = observed_data.shape
+
+        imputed_samples = []
+
+        for i in range(n_samples):
+            # generate noisy observation for unconditional model
+            if self.is_unconditional == True:
+                noisy_obs = observed_data
+                noisy_cond_history = []
+                for t in range(self.num_steps):
+
+                    noise = tf.random.normal(shape=noisy_obs.shape)
+                    # noisy_obs = (tf.gather(self.alpha_hat, indices=t)**0.5)*noisy_obs + tf.gather(self.beta, indices=t)**0.5*noise
+                    noisy_obs = (self.alpha_hat[t] ** 0.5) * noisy_obs + self.beta[t] ** 0.5 * noise
+                    noisy_cond_history.append(noisy_obs * cond_mask)
+
+            current_sample = tf.random.normal(shape=observed_data.shape)
+
+            for t in range(self.num_steps - 1, -1, -1):
+                if self.is_unconditional == True:
+                    diff_input = cond_mask * noisy_cond_history[t] + (1.0 - cond_mask) * current_sample
+                    diff_input = tf.expand_dims(diff_input, axis=-1)  # (B,K,L,1)
+                else:
+                    cond_obs = (cond_mask * observed_data)
+                    cond_obs = tf.expand_dims(cond_obs, axis=-1)
+                    current_sample = tf.cast(current_sample, tf.float64)
+                    noisy_target = ((1 - cond_mask) * current_sample)
+                    noisy_target = tf.expand_dims(noisy_target, axis=-1)
+                    diff_input = tf.concat([cond_obs, noisy_target], axis=-1) # (B,K,L,2)
+
+                predicted = self.diffmodel(diff_input, side_info, tf.convert_to_tensor([t]))
+                coeff1 = 1 / self.alpha_hat[t] ** 0.5
+                coeff2 = (1 - self.alpha_hat[t]) / (1 - self.alpha[t]) ** 0.5
+                predicted = tf.cast(predicted, tf.float64)
+                current_sample = coeff1 * (current_sample - coeff2 * predicted)
+                if t > 0:
+                    noise = tf.random.normal(shape=current_sample.shape)
+                    sigma = (
+                        (1.0 - self.alpha[t - 1]) / (1.0 - self.alpha[t]) * self.beta[t]
+                    ) ** 0.5
+                    noise = tf.cast(noise, tf.float64)
+                    current_sample += sigma * noise
+            imputed_samples.append(current_sample.numpy())
+
+        return imputed_samples
+
+
 
 def create_data():
     train_data = np.load('stock_train.npy')
@@ -581,7 +650,7 @@ def train(
         #         print(
         #             "\n best loss is updated to ",
         #             avg_loss_valid / batch_no,
-        #             "at",
+        #             "at",-
         #             epoch_no,
         #         )
 
@@ -589,13 +658,115 @@ def train(
         model.save_weights(output_path)
 
 
+
+def evaluate(model, test_data, nsample=100, scaler=1, mean_scaler=0, foldername=""):
+
+
+
+    mse_total = 0
+    evalpoints_total = 0
+
+    all_target = []
+    all_observed_point = []
+    all_observed_time = []
+    all_evalpoint = []
+    all_generated_samples = []
+
+    batches = np.array_split(test_data, len(test_data) / 1)
+
+    for batch in batches:
+
+        test_batch = default_masking(batch, missing_ratio=0.1)
+        output = model.evaluate(test_batch, nsample)
+        samples, c_target, eval_points, observed_points, observed_time = output
+
+
+        samples_median = sum(samples)/len(samples)
+        samples_median = np.transpose(samples_median, (0, 2, 1))
+
+
+        c_target = tf.keras.backend.permute_dimensions(c_target, (0, 2, 1))
+        eval_points = np.transpose(eval_points, (0, 2, 1))
+        observed_points =  tf.keras.backend.permute_dimensions(observed_points, (0, 2, 1))
+
+        all_target.append(c_target)
+        all_evalpoint.append(eval_points)
+        all_observed_point.append(observed_points)
+        all_observed_time.append(observed_time)
+        all_generated_samples.append(samples)
+
+        mse_current = (
+            ((samples_median - c_target.numpy()) * eval_points) ** 2
+        ) * (scaler ** 2)
+        # mae_current = (
+        #     torch.abs((samples_median.values - c_target) * eval_points)
+        # ) * scaler
+        mse_total += mse_current.sum().item()
+        # mae_total += mae_current.sum().item()
+        evalpoints_total += eval_points.sum().item()
+
+
+    print('RMSE: {}'.format(np.sqrt(mse_total/evalpoints_total)))
+
+        # it.set_postfix(
+        #     ordered_dict={
+        #         "rmse_total": np.sqrt(mse_total / evalpoints_total),
+        #         "mae_total": mae_total / evalpoints_total,
+        #         "batch_no": batch_no,
+        #     },
+        #     refresh=True,
+        # )
+
+
+
+    # with open(
+    #     foldername + "/generated_outputs_nsample" + str(nsample) + ".pk", "wb"
+    # ) as f:
+    #     all_target = torch.cat(all_target, dim=0)
+    #     all_evalpoint = torch.cat(all_evalpoint, dim=0)
+    #     all_observed_point = torch.cat(all_observed_point, dim=0)
+    #     all_observed_time = torch.cat(all_observed_time, dim=0)
+    #     all_generated_samples = torch.cat(all_generated_samples, dim=0)
+    #
+    #     pickle.dump(
+    #         [
+    #             all_generated_samples,
+    #             all_target,
+    #             all_evalpoint,
+    #             all_observed_point,
+    #             all_observed_time,
+    #             scaler,
+    #             mean_scaler,
+    #         ],
+    #         f,
+    #     )
+
+    # CRPS = calc_quantile_CRPS(
+    #     all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
+    # )
+    #
+    # with open(
+    #     foldername + "/result_nsample" + str(nsample) + ".pk", "wb"
+    # ) as f:
+    #     pickle.dump(
+    #         [
+    #             np.sqrt(mse_total / evalpoints_total),
+    #             mae_total / evalpoints_total,
+    #             CRPS,
+    #         ],
+    #         f,
+    #     )
+    #     print("RMSE:", np.sqrt(mse_total / evalpoints_total))
+    #     print("MAE:", mae_total / evalpoints_total)
+    #     print("CRPS:", CRPS)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="CSDI")
     parser.add_argument("--config", type=str, default="base.yaml")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--testmissingratio", type=float, default=0.1)
     parser.add_argument("--unconditional", action="store_true")
-    parser.add_argument("--modelfolder", type=str, default="stock_fold_20230205_035438")
+    parser.add_argument("--modelfolder", type=str, default="")
     parser.add_argument("--nsample", type=int, default=100)
     args = parser.parse_args()
     print(args)
@@ -623,9 +794,9 @@ if __name__ == '__main__':
     else:
         config['train']['epochs'] = 1
         train(model, config["train"], train_data)
-        model.load_weights('./save/'+ args.modelfolder + "/model.h5")
+        # model.load_weights('./save/'+ args.modelfolder + "/model.h5")
 
-    # evaluate(model, test_data, nsample=args.nsample, scaler=1, foldername=foldername)
+    evaluate(model, test_data, nsample=args.nsample, scaler=1, foldername=foldername)
 
     print('OK')
 
