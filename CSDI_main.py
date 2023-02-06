@@ -13,6 +13,9 @@ import math
 import os
 # from tensorflow.keras import datasets, layers, models, losses
 import json
+import wandb
+import tensorflow_addons as tfa
+# import tensorflow_models as tfm
 
 def silu(x):
     return x * tf.keras.backend.sigmoid(x)
@@ -65,11 +68,10 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
     self.depth = d_model // self.num_heads
 
-    self.wq = tf.keras.layers.Dense(d_model, input_shape=(332,131,64))
-    self.wk = tf.keras.layers.Dense(d_model, input_shape=(332,131,64))
-    self.wv = tf.keras.layers.Dense(d_model, input_shape=(332,131,64))
-
-    self.dense = tf.keras.layers.Dense(d_model, input_shape=(332,131,64))
+    self.wq = tf.keras.layers.Dense(d_model, input_shape=(None, d_model))
+    self.wk = tf.keras.layers.Dense(d_model, input_shape=(None, d_model))
+    self.wv = tf.keras.layers.Dense(d_model, input_shape=(None, d_model))
+    self.dense = tf.keras.layers.Dense(d_model, input_shape=(None, d_model))
 
   def split_heads(self, x, batch_size):
     """分拆最后一个维度到 (num_heads, depth).
@@ -108,22 +110,22 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):
     def __init__(self, d_model, nheads, dim_feedforward, activation="gelu", rate=0.1):
         super(TransformerEncoderLayer, self).__init__()
         # self.self_attn = tf.keras.layers.MultiHeadAttention(num_heads=nheads, key_dim=0)
-        # self.self_attn = tfa.layers.MultiHeadAttention(head_size=d_model, num_heads=nheads)
-        self.self_attn = MultiHeadAttention(d_model=d_model, num_heads=nheads)
+        self.self_attn = tfa.layers.MultiHeadAttention(head_size=d_model, num_heads=nheads)
+        # self.self_attn = MultiHeadAttention(d_model=d_model, num_heads=nheads)
 
         # self.feed_forward = tf.keras.Sequential([
         #     tf.keras.layers.Dense(dim_feedforward, activation=activation),
         #     tf.keras.layers.Dense(d_model),
         # ])
 
-        self.linear1 = tf.keras.layers.Dense(dim_feedforward,input_shape=(332,131,64))
-        self.dropout = tf.keras.layers.Dropout(rate, input_shape=(332,131,64))
-        self.linear2 = tf.keras.layers.Dense(d_model, input_shape=(332,131,64))
+        self.linear1 = tf.keras.layers.Dense(dim_feedforward,input_shape=(None, d_model))
+        self.dropout = tf.keras.layers.Dropout(rate, input_shape=(None, dim_feedforward))
+        self.linear2 = tf.keras.layers.Dense(d_model, input_shape=(None, dim_feedforward))
 
-        self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-5, input_shape=(332,131,64))
-        self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-5, input_shape=(332,131,64))
-        self.dropout1 = tf.keras.layers.Dropout(rate, input_shape=(332,131,64))
-        self.dropout2 = tf.keras.layers.Dropout(rate, input_shape=(332,161,64))
+        self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-5, input_shape=(None, d_model))
+        self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-5, input_shape=(None, d_model))
+        self.dropout1 = tf.keras.layers.Dropout(rate, input_shape=(None, d_model))
+        self.dropout2 = tf.keras.layers.Dropout(rate, input_shape=(None, d_model))
 
         if activation == 'gelu':
             self.activation = tf.keras.activations.gelu
@@ -131,28 +133,30 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):
             self.activation = tf.keras.activations.relu
 
     def call(self, inputs, training=True):
-        attn_output = self.self_attn(inputs, inputs, inputs)[0]
+        attn_output = self.self_attn([inputs, inputs, inputs])[0]
         x = inputs + self.dropout1(attn_output, training=training)
-        x = self.norm1(x)
-        x = self.linear1(x)
+        x1 = self.norm1(x)
+        x = self.linear1(x1)
         x = self.activation(x)
         x = self.dropout(x)
         x2 = self.linear2(x)
-        x = x + self.dropout2(x2, training = training)
+        x = x1 + self.dropout2(x2, training = training)
         x = self.norm2(x)
         return x
 
 class ResidualModule(tf.keras.Model):
     def __init__(self, side_dim, channels, diffusion_embedding_dim, nheads):
         super(ResidualModule, self).__init__()
-        self.dissusion_projection = tf.keras.layers.Dense(channels, input_shape=(1,128))
-        self.cond_projection = tf.keras.layers.Conv1D(2*channels,kernel_size=1,kernel_initializer=kaiming_normal, input_shape=(1,43492,145))
-        self.mid_projection = tf.keras.layers.Conv1D(2 * channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(1,43492,64))
-        self.output_projection = tf.keras.layers.Conv1D(2 * channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(1,43492,64))
+        self.dissusion_projection = tf.keras.layers.Dense(channels, input_shape=(1, diffusion_embedding_dim))
+        self.cond_projection = tf.keras.layers.Conv1D(2*channels,kernel_size=1,kernel_initializer=kaiming_normal, input_shape=(None, side_dim))
+        self.mid_projection = tf.keras.layers.Conv1D(2 * channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(None, channels))
+        self.output_projection = tf.keras.layers.Conv1D(2 * channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(None, channels))
 
         self.time_layer = TransformerEncoderLayer(d_model= channels, nheads = nheads, dim_feedforward=64, activation='gelu')
         self.feature_layer = TransformerEncoderLayer(d_model= channels, nheads = nheads, dim_feedforward=64, activation='gelu')
 
+        # self.time_layer = tfm.nlp.layers.TransformerEncoderBlock(num_attention_heads=nheads, inner_dim=channels, inner_activation='gelu')
+        # self.feature_layer = tfm.nlp.layers.TransformerEncoderBlock(num_attention_heads=nheads, inner_dim=channels, inner_activation='gelu')
     def forward_time(self, y, base_shape):
         B, K, L, channel = base_shape
         if L == 1:
@@ -228,8 +232,8 @@ class DiffusionEmbedding(tf.keras.Model):
             projection_dim = embedding_dim
 
         self.embedding = tf.Variable(self._build_embedding(num_steps, embedding_dim/2), trainable=False)
-        self.projection1 = tf.keras.layers.Dense(projection_dim, activation = silu, input_shape=(1,128))
-        self.projection2 = tf.keras.layers.Dense(projection_dim, activation = silu, input_shape=(1,128))
+        self.projection1 = tf.keras.layers.Dense(projection_dim, activation = silu, input_shape=(1,embedding_dim))
+        self.projection2 = tf.keras.layers.Dense(projection_dim, activation = silu, input_shape=(1,projection_dim))
 
     def _build_embedding(self, num_steps, dim = 64):
         steps = tf.range(0, num_steps, 1)
@@ -252,9 +256,9 @@ class diff_CSDI(tf.keras.Model):
         super(diff_CSDI, self).__init__()
         self.channels = config["channels"]
         self.diffusion_embedding = DiffusionEmbedding(num_steps=config['num_steps'], embedding_dim=config['diffusion_embedding_dim'])
-        self.input_projection = tf.keras.layers.Conv1D(self.channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(1, 43492, 2))
-        self.output_projection1 = tf.keras.layers.Conv1D(self.channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(1, 43492, 64))
-        self.output_projection2 = tf.keras.layers.Conv1D(1, kernel_size=1, kernel_initializer=tf.keras.initializers.Zeros(), input_shape=(1, 43492, 64))
+        self.input_projection = tf.keras.layers.Conv1D(self.channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(None, inputdim))
+        self.output_projection1 = tf.keras.layers.Conv1D(self.channels, kernel_size=1, kernel_initializer=kaiming_normal, input_shape=(None, self.channels))
+        self.output_projection2 = tf.keras.layers.Conv1D(1, kernel_size=1, kernel_initializer=tf.keras.initializers.Zeros(), input_shape=(None, self.channels))
         self.residual_layers = [ResidualModule(side_dim=config['side_dim'], channels=self.channels, diffusion_embedding_dim=config['diffusion_embedding_dim'], nheads=config['nheads']) for _ in range(config['layers'])]
 
     def call(self, x, cond_info, diffusion_step):
@@ -294,7 +298,7 @@ class CSDI_base(tf.keras.Model):
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
 
-        self.embed_layer = tf.keras.layers.Embedding(self.target_dim, self.emb_feature_dim, input_shape=(131, ))
+        self.embed_layer = tf.keras.layers.Embedding(self.target_dim, self.emb_feature_dim, input_shape=(target_dim, ))
         config_diff = config["diffusion"]
         config_diff["side_dim"] = self.emb_total_dim
         input_dim = 1 if self.is_unconditional == True else 2
@@ -386,10 +390,17 @@ class CSDI_base(tf.keras.Model):
         predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L,2)
 
         target_mask = observed_mask - cond_mask
-        predicted = tf.cast(predicted, tf.float64)
-        residual = (noise - predicted) * target_mask
-        num_eval = tf.reduce_sum(target_mask)
-        loss = tf.reduce_sum(residual ** 2) / (num_eval if num_eval > 0 else 1)
+        # predicted = tf.cast(predicted, tf.float64)
+        # residual = (noise - predicted) * target_mask
+        # num_eval = tf.reduce_sum(target_mask)
+
+        target_mask = tf.cast(target_mask, dtype = tf.bool)
+        predict = predicted[target_mask]
+        label = noise[target_mask]
+
+        loss = tf.keras.losses.mean_squared_error(label, predict)
+
+        # loss = tf.reduce_sum(residual ** 2) / (num_eval if num_eval > 0 else 1)
         return loss
 
     def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
@@ -435,14 +446,14 @@ class CSDI_base(tf.keras.Model):
             for_pattern_mask,
             _,
         ) = self.process_data(batch)
-        if is_train == 0:
-            cond_mask = gt_mask
-        elif self.target_strategy != "random":
-            cond_mask = self.get_hist_mask(
-                observed_mask, for_pattern_mask=for_pattern_mask
-            )
-        else:
-            cond_mask = self.get_randmask(observed_mask)
+        # if is_train == 0:
+        cond_mask = gt_mask
+        # elif self.target_strategy != "random":
+        #     cond_mask = self.get_hist_mask(
+        #         observed_mask, for_pattern_mask=for_pattern_mask
+        #     )
+        # else:
+        #     cond_mask = self.get_randmask(observed_mask)
 
         side_info = self.get_side_info(observed_tp, cond_mask)
 
@@ -559,7 +570,6 @@ def kaiming_normal(shape, dtype=tf.float64, partition_info=None):
     return tf.random.normal(shape, mean=0., stddev=tf.math.rsqrt(2. / shape[0]))
 
 def default_masking(batch, missing_ratio, seed=0, train =True):
-    np.random.seed(seed)
     observed_masks = batch!=0
     observed_masks = observed_masks.astype(np.float64)
     observed_values = batch
@@ -587,6 +597,146 @@ def default_masking(batch, missing_ratio, seed=0, train =True):
     return s
 
 
+def random_masking(batch, missing_ratio, seed=0, train =True):
+    observed_masks = batch!=0
+    observed_masks = observed_masks.astype(np.float64)
+    observed_values = batch
+    gt_mask_all = []
+    tp_all = []
+    for sample in observed_masks:
+        gt_mask = copy.deepcopy(sample)
+        for column in gt_mask.T:
+            idx = np.where(column==1)[0]
+            mask = np.random.choice(idx, size = 25, replace=False)
+            column[mask] = 0
+        gt_mask_all.append(gt_mask)
+
+        tp = np.arange(len(gt_mask))
+        tp_all.append(tp)
+    gt_mask_all = np.array(gt_mask_all)
+    tp_all = np.array(tp_all)
+
+    s = {
+        "observed_data": observed_values,
+        "observed_mask": observed_masks,
+        "gt_mask": gt_mask_all,
+        "timepoints": tp_all
+    }
+    return s
+
+def normal_masking(batch, missing_ratio, seed=0, train =True):
+    observed_masks = batch!=0
+    observed_masks = observed_masks.astype(np.float64)
+    observed_values = batch
+    gt_mask_all = []
+    tp_all = []
+
+    for sample in observed_masks:
+        holidays = sample != 1
+        tep1 = move_array_up(holidays)
+        tep2 = move_array_down(holidays)
+        tails = tep1 * sample
+        heads = tep2 * sample
+
+        normal = sample-tails-heads
+        normal = normal == 1
+
+        gt_mask = copy.deepcopy(sample)
+
+        for (column_s, columns_o) in zip(gt_mask.T, normal.T):
+            idx = np.where(columns_o==1)[0]
+            mask = np.random.choice(idx, size = 25, replace=False)
+            column_s[mask] = 0
+        gt_mask_all.append(gt_mask)
+        tp = np.arange(len(gt_mask))
+        tp_all.append(tp)
+    gt_mask_all = np.array(gt_mask_all)
+    tp_all = np.array(tp_all)
+
+    s = {
+        "observed_data": observed_values,
+        "observed_mask": observed_masks,
+        "gt_mask": gt_mask_all,
+        "timepoints": tp_all
+    }
+    return s
+
+
+
+def head_masking(batch, missing_ratio, seed=0, train =True):
+    observed_masks = batch!=0
+    observed_masks = observed_masks.astype(np.float64)
+    observed_values = batch
+    gt_mask_all = []
+    tp_all = []
+
+    for sample in observed_masks:
+        holidays = sample != 1
+        tep = move_array_down(holidays)
+        tails = tep * sample
+        gt_mask = copy.deepcopy(sample)
+        for (column_s, columns_o) in zip(gt_mask.T, tails.T):
+            idx = np.where(columns_o==1)[0]
+            mask = np.random.choice(idx, size = 25, replace=False)
+            column_s[mask] = 0
+        gt_mask_all.append(gt_mask)
+        tp = np.arange(len(gt_mask))
+        tp_all.append(tp)
+    gt_mask_all = np.array(gt_mask_all)
+    tp_all = np.array(tp_all)
+
+    s = {
+        "observed_data": observed_values,
+        "observed_mask": observed_masks,
+        "gt_mask": gt_mask_all,
+        "timepoints": tp_all
+    }
+    return s
+
+
+#
+def tail_masking(batch, missing_ratio, seed=0, train =True):
+    observed_masks = batch!=0
+    observed_masks = observed_masks.astype(np.float64)
+    observed_values = batch
+    gt_mask_all = []
+    tp_all = []
+
+    for sample in observed_masks:
+        holidays = sample != 1
+        tep = move_array_up(holidays)
+        tails = tep * sample
+        gt_mask = copy.deepcopy(sample)
+        for (column_s, columns_o) in zip(gt_mask.T, tails.T):
+            idx = np.where(columns_o==1)[0]
+            mask = np.random.choice(idx, size = 25, replace=False)
+            column_s[mask] = 0
+        gt_mask_all.append(gt_mask)
+        tp = np.arange(len(gt_mask))
+        tp_all.append(tp)
+    gt_mask_all = np.array(gt_mask_all)
+    tp_all = np.array(tp_all)
+
+    s = {
+        "observed_data": observed_values,
+        "observed_mask": observed_masks,
+        "gt_mask": gt_mask_all,
+        "timepoints": tp_all
+    }
+    return s
+
+def move_array_up(arr):
+    rows, cols = arr.shape
+    new_arr = np.zeros((rows, cols), dtype=arr.dtype)
+    new_arr[:-1, :] = arr[1:, :]
+    return new_arr
+
+def move_array_down(arr):
+    rows, cols = arr.shape
+    new_arr = np.zeros((rows, cols), dtype=arr.dtype)
+    new_arr[1:, :] = arr[:-1, :]
+    return new_arr
+
 def train(
     model,
     config,
@@ -602,17 +752,16 @@ def train(
     p1 = int(0.75 * config["epochs"])
     p2 = int(0.9 * config["epochs"])
 
-
     lr_scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay(
         boundaries=[p1, p2], values = [config["lr"], 0.1*config["lr"], 0.01*config["lr"]]
     )
 
     optimizer = tf.keras.optimizers.Adam(learning_rate= lr_scheduler)
     best_valid_loss = 1e10
-    for epoch_no in range(config["epochs"]):
+    for epoch_no in range(50):
         avg_loss = 0
         np.random.shuffle(train_data)
-        batches = np.array_split(train_data, len(train_data)/1)
+        batches = np.array_split(train_data, len(train_data)/B_dim)
         for batch in batches:
 
             train_batch = default_masking(batch, missing_ratio=0.1)
@@ -625,6 +774,11 @@ def train(
 
             avg_loss += loss.numpy()
 
+        info_dict = {
+            "epoch": epoch_no,
+            "loss": avg_loss/len(batches)
+        }
+        wandb.log(info_dict)
         print("epcoh: {}, loss: {}".format(epoch_no, avg_loss/len(batches)))
         # if valid_data is not None and (epoch_no + 1) % valid_epoch_interval == 0:
         #     model.eval()
@@ -668,37 +822,36 @@ def evaluate(model, test_data, nsample=100, scaler=1, mean_scaler=0, foldername=
 
     batches = np.array_split(test_data, len(test_data) / 1)
 
-    for batch in batches:
 
-        test_batch = default_masking(batch, missing_ratio=0.1)
-        output = model.evaluate(test_batch, nsample)
-        samples, c_target, eval_points, observed_points, observed_time = output
-
-
-        samples_median = sum(samples)/len(samples)
-        samples_median = np.transpose(samples_median, (0, 2, 1))
+    for test_epoch in range(5):
+        for batch in batches:
+            test_batch = default_masking(batch, missing_ratio=0.1)
+            output = model.evaluate(test_batch, nsample)
+            samples, c_target, eval_points, observed_points, observed_time = output
 
 
-        c_target = tf.keras.backend.permute_dimensions(c_target, (0, 2, 1))
-        eval_points = np.transpose(eval_points, (0, 2, 1))
-        observed_points =  tf.keras.backend.permute_dimensions(observed_points, (0, 2, 1))
+            samples_median = sum(samples)/len(samples)
+            samples_median = np.transpose(samples_median, (0, 2, 1))
 
-        all_target.append(c_target)
-        all_evalpoint.append(eval_points)
-        all_observed_point.append(observed_points)
-        all_observed_time.append(observed_time)
-        all_generated_samples.append(samples)
+            c_target = tf.keras.backend.permute_dimensions(c_target, (0, 2, 1))
+            eval_points = np.transpose(eval_points, (0, 2, 1))
+            observed_points =  tf.keras.backend.permute_dimensions(observed_points, (0, 2, 1))
 
-        mse_current = (
-            ((samples_median - c_target.numpy()) * eval_points) ** 2
-        ) * (scaler ** 2)
-        # mae_current = (
-        #     torch.abs((samples_median.values - c_target) * eval_points)
-        # ) * scaler
-        mse_total += mse_current.sum().item()
-        # mae_total += mae_current.sum().item()
-        evalpoints_total += eval_points.sum().item()
+            all_target.append(c_target)
+            all_evalpoint.append(eval_points)
+            all_observed_point.append(observed_points)
+            all_observed_time.append(observed_time)
+            all_generated_samples.append(samples)
 
+            mse_current = (
+                ((samples_median - c_target.numpy()) * eval_points) ** 2
+            ) * (scaler ** 2)
+            # mae_current = (
+            #     torch.abs((samples_median.values - c_target) * eval_points)
+            # ) * scaler
+            mse_total += mse_current.sum().item()
+            # mae_total += mae_current.sum().item()
+            evalpoints_total += eval_points.sum().item()
 
     print('RMSE: {}'.format(np.sqrt(mse_total/evalpoints_total)))
 
@@ -755,6 +908,12 @@ def evaluate(model, test_data, nsample=100, scaler=1, mean_scaler=0, foldername=
     #     print("CRPS:", CRPS)
 
 if __name__ == '__main__':
+
+
+    tf.random.set_seed(0)
+    np.random.seed(0)
+
+    wandb.init(project='JP_morgan')
     parser = argparse.ArgumentParser(description="CSDI")
     parser.add_argument("--config", type=str, default="base.yaml")
     parser.add_argument("--seed", type=int, default=1)
@@ -775,7 +934,13 @@ if __name__ == '__main__':
     print('model folder:', foldername)
     os.makedirs(foldername, exist_ok=True)
     train_data, test_data = create_data()
-    model = CSDI_base(target_dim=131, config=config)
+
+    global K_dim, L_dim, B_dim
+    K_dim = train_data.shape[2]
+    L_dim = train_data.shape[1]
+    B_dim = 1
+
+    model = CSDI_base(target_dim=K_dim, config=config)
     if args.modelfolder == "":
         model.compile(optimizer='adam')
         train(

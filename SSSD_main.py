@@ -9,7 +9,7 @@ import os
 import tensorflow as tf
 import numpy as np
 import tensorflow_addons as tfa
-from CSDI_main import kaiming_normal, create_data, default_masking
+from CSDI_main import kaiming_normal, create_data, default_masking, random_masking, normal_masking, head_masking, tail_masking
 from CSDI_main import silu as swish
 import math
 import opt_einsum as oe
@@ -22,6 +22,8 @@ contract_expression = oe.contract_expression
 import copy
 import datetime
 
+
+masking_fun = random_masking
 
 def cauchy_slow(v, z, w):
     """
@@ -1359,12 +1361,12 @@ def train_main(output_directory,
     _dh = diffusion_hyperparams
     T, Alpha_bar = _dh["T"], _dh["Alpha_bar"]
 
-    for epoch_no in range(n_iters):
+    for epoch_no in range(50):
         avg_loss = 0
         np.random.shuffle(train_data)
         batches = np.array_split(train_data, len(train_data)/1)
         for batch in batches:
-            train_batch = default_masking(batch, missing_ratio=0.1)
+            train_batch = masking_fun(batch, missing_ratio=0.1)
             audio = train_batch['observed_data']
             cond = audio
             mask = train_batch['gt_mask']
@@ -1383,6 +1385,7 @@ def train_main(output_directory,
                 epsilon_theta = model((transformed_X, cond, mask, diffusion_steps,))
                 loss_mask = tf.constant(loss_mask, dtype = tf.bool)
                 predict = epsilon_theta[loss_mask]
+                audio =tf.cast(audio, predict.dtype)
                 label = audio[loss_mask]
                 loss = tf.keras.losses.mean_squared_error(label, predict)
                 tape.watch(loss)
@@ -1424,7 +1427,7 @@ def train_main(output_directory,
         for batch in batches:
             size = batch.shape
             size = (100, size[1], size[2])
-            test_batch = default_masking(batch, missing_ratio=0.1)
+            test_batch = masking_fun(batch, missing_ratio=0.1)
             audio = test_batch['observed_data']
             cond = audio
             mask = test_batch['gt_mask']
@@ -1448,6 +1451,7 @@ def train_main(output_directory,
             x = tf.reduce_mean(x, axis=0)
             x = tf.expand_dims(x, axis=0)
             predict = x[loss_mask]
+            audio = tf.cast(audio, predict.dtype)
             label = audio[loss_mask]
             loss = tf.keras.losses.mean_squared_error(label, predict)
 
@@ -1457,6 +1461,12 @@ def train_main(output_directory,
     print('RMSE: {}'.format(np.sqrt(loss_all/eval_points_all)))
 
 if __name__ == "__main__":
+
+
+
+
+    tf.random.set_seed(0)
+    np.random.seed(0)
 
     wandb.init(project='JP_morgan')
     tf.get_logger().setLevel(logging.ERROR)
