@@ -15,9 +15,12 @@ import math
 import opt_einsum as oe
 from einops import rearrange, repeat
 from scipy import special as ss
+import logging
+import wandb
 contract = oe.contract
 contract_expression = oe.contract_expression
 import copy
+import datetime
 
 
 def cauchy_slow(v, z, w):
@@ -84,7 +87,8 @@ class Conv(tf.keras.Model):
         self.conv = tfa.layers.WeightNormalization(self.conv)
 
     def call(self, x):
-        x = tf.pad(x, tf.constant([[0,0],[self.padding, self.padding], [0,0]]))
+        if self.padding!=0:
+            x = tf.pad(x, tf.constant([[0,0],[self.padding, self.padding], [0,0]]))
         out = self.conv(x)
         return out
 
@@ -427,7 +431,7 @@ class SSKernelNPLR(object):
         return k_B, k_state
 
     def double_length(self):
-        if self.verbose: log.info(f"S4: Doubling length from L = {self.L} to {2*self.L}")
+        # if self.verbose: log.info(f"S4: Doubling length from L = {self.L} to {2*self.L}")
         self._setup_C(double_length=True)
 
     def _setup_linear(self):
@@ -1103,9 +1107,7 @@ class Residual_block(tf.keras.Model):
                  s4_layernorm):
         super(Residual_block, self).__init__()
         self.res_channels = res_channels
-
         self.fc_t = tf.keras.layers.Dense(self.res_channels, input_shape=(None, diffusion_step_embed_dim_out))
-
         self.S41 = S4Layer(features=2 * self.res_channels,
                            lmax=s4_lmax,
                            N=s4_d_state,
@@ -1113,8 +1115,7 @@ class Residual_block(tf.keras.Model):
                            bidirectional=s4_bidirectional,
                            layer_norm=s4_layernorm)
 
-
-        self.conv_layer = Conv(self.res_channels, 2 * self.res_channels, kernel_size=3)
+        self.conv_layer = Conv(input_shape=self.res_channels, out_channels=2 * self.res_channels, kernel_size=3)
 
         self.S42 = S4Layer(features=2 * self.res_channels,
                            lmax=s4_lmax,
@@ -1123,7 +1124,7 @@ class Residual_block(tf.keras.Model):
                            bidirectional=s4_bidirectional,
                            layer_norm=s4_layernorm)
 
-        self.cond_conv = Conv(2 * in_channels, 2 * self.res_channels, kernel_size=1)
+        self.cond_conv = Conv(input_shape=2 * in_channels, out_channels=2 * self.res_channels, kernel_size=1)
 
 
         self.res_conv = tf.keras.layers.Conv1D(res_channels, kernel_size=1, kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2.0, mode='fan_in', distribution='normal'),
@@ -1255,7 +1256,7 @@ class SSSDS4Imputer(tf.keras.Model):
                  s4_layernorm):
         super(SSSDS4Imputer, self).__init__()
 
-        self.init_conv = tf.keras.Sequential([Conv(131, out_channels=res_channels, kernel_size=1), tf.keras.layers.ReLU()])
+        self.init_conv = tf.keras.Sequential([Conv(input_shape=in_channels, out_channels=res_channels, kernel_size=1), tf.keras.layers.ReLU()])
 
         self.residual_layer = Residual_group(res_channels=res_channels,
                                              skip_channels=skip_channels,
@@ -1324,11 +1325,11 @@ def train_main(output_directory,
                                               diffusion_config["beta_T"])
 
     # Get shared output_directory ready
-    output_directory = os.path.join(output_directory, local_path)
-    if not os.path.isdir(output_directory):
-        os.makedirs(output_directory)
-        os.chmod(output_directory, 0o775)
-    print("output directory", output_directory, flush=True)
+    # output_directory = os.path.join(output_directory, local_path)
+    # if not os.path.isdir(output_directory):
+    #     os.makedirs(output_directory)
+    #     os.chmod(output_directory, 0o775)
+    # print("output directory", output_directory, flush=True)
 
     # # predefine model
     # if use_model == 0:
@@ -1337,12 +1338,15 @@ def train_main(output_directory,
     #     net = SSSDSAImputer(**model_config).cuda()
     # elif use_model == 2:
     #     net = SSSDS4Imputer(**model_config).cuda()
+    current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    foldername = "./save/stock_SSSD" + "_" + current_time + "/"
+    output_path = foldername + "model.h5"
+    print('model folder:', foldername)
+    os.makedirs(foldername, exist_ok=True)
 
     model = SSSDS4Imputer(**model_config)
-
+    model.compile(optimizer='adam', loss='mean_squared_error')
     train_data, test_data = create_data()
-
-    output_path = "SSSD_model.h5"
     p1 = int(0.75 * n_iters)
     p2 = int(0.9 * n_iters)
 
@@ -1382,11 +1386,17 @@ def train_main(output_directory,
                 label = audio[loss_mask]
                 loss = tf.keras.losses.mean_squared_error(label, predict)
                 tape.watch(loss)
+                avg_loss += loss.numpy()
             grads = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        print('ok')
+        print("epcoh: {}, loss: {}".format(epoch_no, avg_loss / len(batches)))
+        info_dict = {
+            'epoch': epoch_no,
+            'loss': avg_loss / len(batches)
+        }
 
-
+        wandb.log(info_dict)
+    # model.save_weights(output_path)
     #             epsilon_theta[loss_mask], z[loss_mask]
     #
     #             tape.watch(loss)
@@ -1400,11 +1410,56 @@ def train_main(output_directory,
     # if foldername != "":
     #     model.save_weights(output_path)
 
+    _dh = diffusion_hyperparams
+    T, Alpha, Alpha_bar, Sigma = _dh["T"], _dh["Alpha"], _dh["Alpha_bar"], _dh["Sigma"]
+    assert len(Alpha) == T
+    assert len(Alpha_bar) == T
+    assert len(Sigma) == T
+    loss_all = 0
+    eval_points_all = 0
+    np.random.shuffle(test_data)
+    batches = np.array_split(test_data, len(test_data) / 1)
+    test_epoch = 5
+    for epoch_no in range(test_epoch):
+        for batch in batches:
+            size = batch.shape
+            size = (100, size[1], size[2])
+            test_batch = default_masking(batch, missing_ratio=0.1)
+            audio = test_batch['observed_data']
+            cond = audio
+            mask = test_batch['gt_mask']
+            loss_mask = test_batch['observed_mask'] - test_batch['gt_mask']
 
+            x = tf.random.normal(shape=size)
 
+            for t in range(T - 1, -1, -1):
+                x = x * (1 - mask) + cond * mask
+                diffusion_steps = (t * tf.ones((size[0], 1)))  # use the corresponding reverse step
+                epsilon_theta = model((x, cond, mask, diffusion_steps,))
+                epsilon_theta = tf.cast(epsilon_theta, tf.float64)# predict \epsilon according to \epsilon_\theta
+                x = tf.cast(x, tf.float64)
+                # update x_{t-1} to \mu_\theta(x_t)
+                x = (x - (1 - Alpha[t]) / tf.sqrt(1 - Alpha_bar[t]) * epsilon_theta) / tf.sqrt(Alpha[t])
+                if t > 0:
+                    x = x + Sigma[t] * tf.cast(tf.random.normal(size), tf.float64)  # add the variance term to x_{t-1}
 
+            eval_point = tf.reduce_sum(loss_mask).numpy()
+            loss_mask = tf.constant(loss_mask, dtype=tf.bool)
+            x = tf.reduce_mean(x, axis=0)
+            x = tf.expand_dims(x, axis=0)
+            predict = x[loss_mask]
+            label = audio[loss_mask]
+            loss = tf.keras.losses.mean_squared_error(label, predict)
+
+            loss_all += loss.numpy()
+            eval_points_all += eval_point
+
+    print('RMSE: {}'.format(np.sqrt(loss_all/eval_points_all)))
 
 if __name__ == "__main__":
+
+    wandb.init(project='JP_morgan')
+    tf.get_logger().setLevel(logging.ERROR)
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default='./config_SSSDS4_stock.json', help='JSON file for configuration')
     args = parser.parse_args()

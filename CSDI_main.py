@@ -153,7 +153,6 @@ class ResidualModule(tf.keras.Model):
         self.time_layer = TransformerEncoderLayer(d_model= channels, nheads = nheads, dim_feedforward=64, activation='gelu')
         self.feature_layer = TransformerEncoderLayer(d_model= channels, nheads = nheads, dim_feedforward=64, activation='gelu')
 
-
     def forward_time(self, y, base_shape):
         B, K, L, channel = base_shape
         if L == 1:
@@ -772,7 +771,7 @@ if __name__ == '__main__':
     config["model"]["is_unconditional"] = args.unconditional
     config["model"]["test_missing_ratio"] = args.testmissingratio
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    foldername = "./save/stock_fold" + "_" + current_time + "/"
+    foldername = "./save/stock_CSDI" + "_" + current_time + "/"
     print('model folder:', foldername)
     os.makedirs(foldername, exist_ok=True)
     train_data, test_data = create_data()
@@ -792,6 +791,5 @@ if __name__ == '__main__':
         model.load_weights('./save/'+ args.modelfolder + "/model.h5")
 
     evaluate(model, test_data, nsample=args.nsample, scaler=1, foldername=foldername)
-
     print('OK')
 

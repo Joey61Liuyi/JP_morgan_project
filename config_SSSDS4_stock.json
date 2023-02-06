@@ -1,6 +1,6 @@
 {
     "diffusion_config":{
-        "T": 200,
+        "T": 50,
         "beta_0": 0.0001,
         "beta_T": 0.02
     },
@@ -24,7 +24,7 @@
         "ckpt_iter": "max",
         "iters_per_ckpt": 30000,
         "iters_per_logging": 100,
-        "n_iters": 150000,
+        "n_iters": 200,
         "learning_rate": 2e-4,
         "only_generate_missing": 1,
         "use_model": 2,
