@@ -23,7 +23,7 @@ import copy
 import datetime
 
 
-masking_fun = tail_masking
+masking_fun = default_masking
 
 def cauchy_slow(v, z, w):
     """
@@ -1422,12 +1422,12 @@ def train_main(output_directory,
     eval_points_all = 0
     np.random.shuffle(test_data)
     batches = np.array_split(test_data, len(test_data) / 1)
-    test_epoch = 5
+    test_epoch = 2
     for epoch_no in range(test_epoch):
         for batch in batches:
             size = batch.shape
             size = (100, size[1], size[2])
-            test_batch = masking_fun(batch, missing_ratio=0.1)
+            test_batch = normal_masking(batch, missing_ratio=0.1)
             audio = test_batch['observed_data']
             cond = audio
             mask = test_batch['gt_mask']
