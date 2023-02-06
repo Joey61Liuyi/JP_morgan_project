@@ -23,7 +23,7 @@ import copy
 import datetime
 
 
-masking_fun = random_masking
+masking_fun = tail_masking
 
 def cauchy_slow(v, z, w):
     """
